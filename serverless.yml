@@ -88,7 +88,7 @@ provider:
 
 functions:
   websocketHandler:
-    handler: src/handler.handle
+    handler: src/handlers.handle
     events:
       - websocket:
           route: $connect

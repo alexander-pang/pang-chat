@@ -4,14 +4,18 @@ import AWS, { AWSError } from "aws-sdk";
 //Types
 type Action = "getClients" | "sendMessage" | "getMessages" | "$disconnect" | "$connect";
 type Client = {
-  connectionId: string
-  nickname: string
-}
+  connectionId: string;
+  nickname: string;
+};
 
 //Globals
 const CLIENT_TABLE_NAME = "Clients";
 const twoHundredResponse = {
   statusCode: 200,
+  body: "",
+};
+const forbidden = {
+  statusCode: 403,
   body: "",
 };
 
@@ -22,7 +26,7 @@ const apiGWManagementAPI = new AWS.ApiGatewayManagementApi({
 
 //client connects to websocket server
 export const handle = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  // wss://asds.aws.com?nickname=alex
+  // wss://amazonaws.com?nickname=alex
   const connectionId = event.requestContext.connectionId as string;
   const routeKey = event.requestContext.routeKey as Action;
 
@@ -41,17 +45,17 @@ export const handle = async (event: APIGatewayProxyEvent): Promise<APIGatewayPro
   }
 };
 
-const getEveryClient = async () : Promise<Client[]> => {
+const getEveryClient = async (): Promise<Client[]> => {
   const output = await docClient
     .scan({
       TableName: CLIENT_TABLE_NAME,
     })
     .promise();
-    const clients = output.Items || [];
-    return clients as Client[];
-}
+  const clients = output.Items || [];
+  return clients as Client[];
+};
 
-const postToConnection = async (connectionId:string, data:string ) => {
+const postToConnection = async (connectionId: string, data: string): Promise<boolean> => {
   try {
     await apiGWManagementAPI
       .postToConnection({
@@ -59,6 +63,7 @@ const postToConnection = async (connectionId:string, data:string ) => {
         Data: JSON.stringify(data),
       })
       .promise();
+    return true;
   } catch (e) {
     //handle a stale connection
     if ((e as AWSError).statusCode !== 410) {
@@ -72,18 +77,19 @@ const postToConnection = async (connectionId:string, data:string ) => {
         },
       })
       .promise();
+    return false;
   }
-}
+};
 
-const notifyClients = async (connectionIdToIgnore: string) : Promise<APIGatewayProxyResult> => {
+const notifyClients = async (connectionIdToIgnore: string) => {
   const clients = await getEveryClient();
-  
+
   await Promise.all(
     clients
-    .filter((client) => client.connectionId !== connectionIdToIgnore)
-    .map(async (client) => {
-      await postToConnection(client.connectionId, JSON.stringify(clients));
-    }),
+      .filter((client) => client.connectionId !== connectionIdToIgnore)
+      .map(async (client) => {
+        await postToConnection(client.connectionId, buildClientsMessage(clients));
+      }),
   );
 };
 
@@ -97,7 +103,7 @@ const handleGetClients = async (connectionId: string): Promise<APIGatewayProxyRe
   //if no clients then we'll have an empty list
   const clients = await getEveryClient();
 
-  await postToConnection(connectionId, JSON.stringify(clients));
+  await postToConnection(connectionId, buildClientsMessage(clients));
 
   return twoHundredResponse;
 };
@@ -120,10 +126,30 @@ const handleConnect = async (
   queryStringParameters: APIGatewayProxyEventQueryStringParameters | null,
 ): Promise<APIGatewayProxyResult> => {
   if (!queryStringParameters || !queryStringParameters["nickname"]) {
-    return {
-      statusCode: 403,
-      body: "",
-    };
+    return forbidden;
+  }
+
+  const output = await docClient
+    .query({
+      TableName: CLIENT_TABLE_NAME,
+      IndexName: "NicknameIndex",
+      //name may be restricted by AWS so placeholder
+      KeyConditionExpression: "#nickname = :nickname",
+      ExpressionAttributeNames: {
+        "#nickname": "nickname",
+      },
+      ExpressionAttributeValues: {
+        ":nickname": queryStringParameters["nickname"],
+      },
+    })
+    .promise();
+
+  // case 1: client connects to chat and doesn't disconnect properly and tries to connect again
+  if (output.Count && output.Count > 0) {
+    const client = (output.Items as Client[])[0];
+    if (await postToConnection(client.connectionId, JSON.stringify({ type: "ping" }))) {
+      return forbidden;
+    }
   }
 
   await docClient
@@ -140,3 +166,6 @@ const handleConnect = async (
 
   return twoHundredResponse;
 };
+
+const buildClientsMessage = (clients: Client[]): string => JSON.stringify({ type: "clients", value: { clients } });
+
