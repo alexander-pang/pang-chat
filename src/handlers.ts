@@ -13,17 +13,17 @@ type Client = {
 type GetMessagesBody = {
   targetNickname: string;
   limit: number;
-  smartKey: Key | undefined;
-}
+  startKey: Key | undefined;
+};
 type SendMessageBody = {
   message: string;
   receiverNickname: string;
-}
+};
 
 //Globals
-class HandleError extends Error {};
+class HandleError extends Error {}
 const CLIENT_TABLE_NAME = "Clients";
-const MESSAGES_TABLE_NAME = "Messages"
+const MESSAGES_TABLE_NAME = "Messages";
 const twoHundredResponse = {
   statusCode: 200,
   body: "",
@@ -44,7 +44,7 @@ export const handle = async (event: APIGatewayProxyEvent): Promise<APIGatewayPro
   const connectionId = event.requestContext.connectionId as string;
   const routeKey = event.requestContext.routeKey as Action;
 
-  try{
+  try {
     switch (routeKey) {
       case "getMessages":
         return handleGetMessages(connectionId, parseGetMessagesBody(event.body));
@@ -61,17 +61,15 @@ export const handle = async (event: APIGatewayProxyEvent): Promise<APIGatewayPro
           statusCode: 500,
           body: "",
         };
-      }
-  } catch(e){
-    if (e instanceof HandleError){
-      await postToConnection(connectionId, e.message);
+    }
+  } catch (e) {
+    if (e instanceof HandleError) {
+      await postToConnection(connectionId, JSON.stringify({type: "error", message: e.message}));
       return twoHundredResponse;
     }
     throw e;
   }
-
-  
-  };
+};
 
 const getEveryClient = async (): Promise<Client[]> => {
   const output = await docClient
@@ -121,25 +119,40 @@ const notifyClients = async (connectionIdToIgnore: string) => {
   );
 };
 
-const handleGetMessages =async (
-  connectionId:string,
-  body: GetMessagesBody,
-  ): Promise<APIGatewayProxyResult> => {
-    body.targetNickname
-  const queryOutput = docClient.query({
-    TableName: MESSAGES_TABLE_NAME,
-    IndexName: "NicknameToNicknameIndex",
-          //name may be restricted by AWS so placeholder
-          KeyConditionExpression: "#nicknameToNickname = :nicknameToNickname",
-          ExpressionAttributeNames: {
-            "#nicknameToNickname": "nicknameToNickname",
-          },
-          ExpressionAttributeValues: {
-            ":nicknameToNickname": nickname,
-          },
+const handleGetMessages = async (connectionId: string, body: GetMessagesBody): Promise<APIGatewayProxyResult> => {
+  const client = await getClient(connectionId);
+  const queryOutput = await docClient
+    .query({
+      TableName: MESSAGES_TABLE_NAME,
+      IndexName: "NicknameToNicknameIndex",
+      //name may be restricted by AWS so placeholder
+      KeyConditionExpression: "#nicknameToNickname = :nicknameToNickname",
+      ExpressionAttributeNames: {
+        "#nicknameToNickname": "nicknameToNickname",
+      },
+      ExpressionAttributeValues: {
+        ":nicknameToNickname": getNickNameToNickName([client.nickname, body.targetNickname]),
+      },
+      Limit: body.limit,
+      ExclusiveStartKey: body.startKey,
+      ScanIndexForward: false,
+    })
+    .promise();
 
-  })
-}
+  const messages = queryOutput.Items && queryOutput.Items.length > 0 ? queryOutput.Items : [];
+  await postToConnection(
+    connectionId,
+    JSON.stringify({
+      type: "messages",
+      value: {
+        messages,
+      },
+    }),
+  );
+  return twoHundredResponse;
+};
+
+const getNickNameToNickName = (nicknames: string[]): string => nicknames.sort().join("#");
 
 const handleGetClients = async (connectionId: string): Promise<APIGatewayProxyResult> => {
   const output = await docClient
@@ -180,7 +193,7 @@ const handleConnect = async (
 
   const existingConnectionId = await getConnectioinIdByNickname(queryStringParameters["nickname"]);
   if (existingConnectionId && JSON.stringify({ type: "ping" })) {
-      return forbidden;
+    return forbidden;
   }
 
   await docClient
@@ -198,7 +211,7 @@ const handleConnect = async (
   return twoHundredResponse;
 };
 
-const getConnectioinIdByNickname = async (nickname:string): Promise<string | undefined> => {
+const getConnectioinIdByNickname = async (nickname: string): Promise<string | undefined> => {
   const output = await docClient
     .query({
       TableName: CLIENT_TABLE_NAME,
@@ -220,78 +233,87 @@ const getConnectioinIdByNickname = async (nickname:string): Promise<string | und
     return client.connectionId;
   }
   return undefined;
-}
+};
 
 const buildClientsMessage = (clients: Client[]): string => JSON.stringify({ type: "clients", value: { clients } });
 
-const handleSendMessage = async (
-  senderConnectionId:string,
-  body:SendMessageBody
-  ): Promise<APIGatewayProxyResult> => {
+const getClient = async (connectionId: string) => {
+  const outputFromClientTable = await docClient
+    .get({
+      TableName: CLIENT_TABLE_NAME,
+      Key: {
+        connectionId: connectionId,
+      },
+    })
+    .promise();
+
+  return outputFromClientTable.Item as Client;
+};
+
+const handleSendMessage = async (senderConnectionId: string, body: SendMessageBody): Promise<APIGatewayProxyResult> => {
   //1. create a message in messages table
-  
-  const outputFromClientTable = await docClient.get({
-    TableName: CLIENT_TABLE_NAME,
-    Key: {
-      connectionId: senderConnectionId,
-    },
-  })
-  .promise();
+  const sender = await getClient(senderConnectionId);
 
-  const sender = outputFromClientTable.Item as Client;
+  // ensures that conversations between senderreceiver aren't also stored as receiversender
+  const nicknameToNickname = getNickNameToNickName([sender.nickname, body.receiverNickname]);
 
-  // ensures that conversations between senderreceiver aren't also stored as receiversender  
-  const nicknameToNickname = [sender.nickname, body.receiverNickname].sort().join("#");
-
-  await docClient.put({
-    TableName: MESSAGES_TABLE_NAME,
-    Item: {
-      messageId: v4(),
-      createdAt: new Date().getMilliseconds(),
-      nicknameToNickname: nicknameToNickname,
-      message: body.message,
-      sender: sender.nickname,
-    },
-  })
-  .promise();
+  await docClient
+    .put({
+      TableName: MESSAGES_TABLE_NAME,
+      Item: {
+        messageId: v4(),
+        createdAt: new Date().getTime(),
+        nicknameToNickname: nicknameToNickname,
+        message: body.message,
+        sender: sender.nickname,
+      },
+    })
+    .promise();
 
   //2. send message to receiver connection id if connected
 
   const receiverConnectionId = await getConnectioinIdByNickname(body.receiverNickname);
 
-  if (receiverConnectionId){
-    await postToConnection(receiverConnectionId, JSON.stringify({
-      type: "message",
-      value: {
-        sender: sender.nickname,
-        message: body.message,
-      },
-    }))
+  if (receiverConnectionId) {
+    await postToConnection(
+      receiverConnectionId,
+      JSON.stringify({
+        type: "message",
+        value: {
+          sender: sender.nickname,
+          message: body.message,
+        },
+      }),
+    );
   }
   return twoHundredResponse;
 };
 
-const parseSendMessageBody = (body:string | null): SendMessageBody => {
+// for testing {"action":"sendMessage","message":"hi", "receiverNickname":"tom"}
+
+const parseSendMessageBody = (body: string | null): SendMessageBody => {
   const SendMessageBody = JSON.parse(body || "{}") as SendMessageBody;
 
-  if(!SendMessageBody || 
-    typeof SendMessageBody.message !== "string" 
-    || typeof SendMessageBody.receiverNickname !== "string"){
-      throw new HandleError("incorrect SendMessageBody format");
-    }
+  if (
+    !SendMessageBody ||
+    typeof SendMessageBody.message !== "string" ||
+    typeof SendMessageBody.receiverNickname !== "string"
+  ) {
+    throw new HandleError("incorrect SendMessageBody format");
+  }
 
   return SendMessageBody;
-}
+};
 
-const parseGetMessagesBody = (body:string | null): GetMessagesBody => {
-  const getMessagesBody = JSON.parse(body || "{}") as GetMessagesBody
+const parseGetMessagesBody = (body: string | null): GetMessagesBody => {
+  const getMessagesBody = JSON.parse(body || "{}") as GetMessagesBody;
 
-  if(!getMessagesBody ||
+  if (
+    !getMessagesBody ||
     typeof getMessagesBody.targetNickname !== "string" ||
     typeof getMessagesBody.limit !== "number"
-  ){
+  ) {
     throw new HandleError("incorrect GetNessages format");
   }
   return getMessagesBody;
-}
-
+};
