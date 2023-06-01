@@ -1,52 +1,20 @@
-# Serverless - AWS Node.js Typescript
+Backend WebSocket Server
+-Utilizes AWS API Gateway with websocket events like $connect, $disconnect, getMessages, getClients, and sendMessages. These are pointed at a lambda function
 
-Serverless Framework template for zero-config TypeScript support.
+A $connect WS event will fire when client connects to WS Server. We will populate the Clients table with a connectionID that we get from API GateWay and a username of the client
 
-## Features
+A $disconnect will delete a client from the Clients table.
 
-Thanks to [`serverless-typescript`](https://github.com/prisma-labs/serverless-plugin-typescript) plugin:
+The app will have the following custom WS events:
 
-- Zero-config: Works out of the box without the need to install any other compiler or plugins
-- Supports ES2015 syntax + features (`export`, `import`, `async`, `await`, `Promise`, ...)
-- Supports `sls package`, `sls deploy` and `sls deploy function`
-- Supports `sls invoke local` + `--watch` mode
-- Integrates nicely with [`serverless-offline`](https://github.com/dherault/serverless-offline)
+getClients will return a list of currently connected clients the user can chat with.
 
-## Prerequisites
+sendMessages will allow users to send messages to each other.
 
-- [`serverless-framework`](https://github.com/serverless/serverless)
-- [`node.js`](https://nodejs.org)
+getMessages will give the conversation history.
 
-## Usage
+Database implementation is in AWS DynamoDB with a clients table to store information about connected clients and a Messages table that keeps the conversation history for a pair of users. 
 
-To create new serverless AWS TypeScript project using this template run:
+FrontEnd will be a static page hosted in S3 bucket.
 
-```bash
-serverless create \
---template-url https://github.com/ttarnowski/serverless-aws-nodejs-typescript/tree/main \
---path myServiceName
-```
-
-where `myServiceName` should be replaced with the name of your choice.
-
-Then change directory to the newly created one:
-
-```
-cd myServiceName
-```
-
-And run:
-
-```
-npm install
-```
-
-or:
-
-```
-yarn install
-```
-
-## Licence
-
-MIT.
+It'll have a couple of views, one login page where the user can provide a username to be saved in local storage of the browser. The chat view will have a list of connected users and a way to chat with them. 
